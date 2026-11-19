@@ -1,19 +1,26 @@
-from datetime import datetime, time
-from urllib.parse import urlencode
+from datetime import datetime, time as dt_time, timedelta
+import os
+from zoneinfo import ZoneInfo
 import streamlit as st
 
-# ---------------------------------------------------------
-# 1. App Configuration & Constants
-# ---------------------------------------------------------
-st.set_page_config(page_title="Multi-Platform Publisher", layout="centered")
+from meta_uploader import (
+    get_authenticated_meta_session,
+    upload_to_facebook,
+    upload_to_instagram,
+)
+from x_uploader import upload_to_x
+from youtube_uploader import (
+    get_authenticated_youtube_service,
+    to_iso_utc,
+    upload_to_youtube,
+)
 
-REDIRECT_URI = "https://multi-platform-publisher.streamlit.app"
-YOUTUBE_SCOPE = "https://www.googleapis.com/auth/youtube.upload"
-META_SCOPES = ["public_profile"]
+st.set_page_config(page_title="Multi-Platform Video Publisher", page_icon="🎬")
+st.title("🎬 Multi-Platform Video Auto-Publisher")
 
 
 # ---------------------------------------------------------
-# 2. URL & Session State Helpers (Keep all connections intact)
+# Helpers: Keep connections & checkboxes intact across reruns
 # ---------------------------------------------------------
 def _get_persisted_connected() -> set[str]:
     raw = st.query_params.get("connected", "")
@@ -22,272 +29,240 @@ def _get_persisted_connected() -> set[str]:
     return {item.strip() for item in raw.split(",") if item.strip()}
 
 
-def _save_persisted_connected(connected_set: set[str]):
-    st.query_params.clear()
-    if connected_set:
-        st.query_params["connected"] = ",".join(sorted(connected_set))
-
-
-def _current_connected_set() -> set[str]:
+def _sync_persisted_connected():
     active = set()
-    if st.session_state.get("yt_connected"):
+    if st.session_state.get("yt_service") is not None:
         active.add("youtube")
-    if st.session_state.get("fb_connected"):
-        active.add("facebook")
-    if st.session_state.get("ig_connected"):
-        active.add("instagram")
-    if st.session_state.get("x_connected"):
+    if st.session_state.get("meta_pages"):
+        if st.session_state.get("cb_fb"):
+            active.add("facebook")
+        if st.session_state.get("cb_ig"):
+            active.add("instagram")
+    if st.session_state.get("cb_x"):
         active.add("x")
-    return active
+
+    # Preserve previously connected flags from URL if session just reran
+    for item in _get_persisted_connected():
+        if item == "youtube" and st.session_state.get("cb_yt"):
+            active.add("youtube")
+        elif item == "facebook" and st.session_state.get("cb_fb"):
+            active.add("facebook")
+        elif item == "instagram" and st.session_state.get("cb_ig"):
+            active.add("instagram")
+        elif item == "x" and st.session_state.get("cb_x"):
+            active.add("x")
+
+    if active:
+        st.query_params["connected"] = ",".join(sorted(active))
+    elif "connected" in st.query_params:
+        del st.query_params["connected"]
 
 
 persisted = _get_persisted_connected()
 
-DEFAULTS = {
-    "yt_connected": "youtube" in persisted,
-    "fb_connected": "facebook" in persisted,
-    "ig_connected": "instagram" in persisted,
-    "x_connected": "x" in persisted,
-    "yt_token": None,
-    "fb_token": None,
-    "ig_token": None,
-    "yt_error": None,
-    "fb_error": None,
-    "ig_error": None,
-    "cb_yt": "youtube" in persisted,
-    "cb_fb": "facebook" in persisted,
-    "cb_ig": "instagram" in persisted,
-    "cb_x": "x" in persisted,
-    "processed_codes": set(),
-}
+if "cb_yt" not in st.session_state:
+    st.session_state["cb_yt"] = "youtube" in persisted or True
+if "cb_fb" not in st.session_state:
+    st.session_state["cb_fb"] = "facebook" in persisted
+if "cb_ig" not in st.session_state:
+    st.session_state["cb_ig"] = "instagram" in persisted
+if "cb_x" not in st.session_state:
+    st.session_state["cb_x"] = "x" in persisted
 
-for key, value in DEFAULTS.items():
-    if key not in st.session_state:
-        st.session_state[key] = set() if isinstance(value, set) else value
-    elif key.endswith("_connected") and value is True:
-        st.session_state[key] = True
-    elif key.startswith("cb_") and value is True:
-        st.session_state[key] = True
+if "yt_service" not in st.session_state:
+    st.session_state["yt_service"] = None
+if "meta_pages" not in st.session_state:
+    st.session_state["meta_pages"] = None
 
 
 # ---------------------------------------------------------
-# 3. OAuth URL Builders
+# Video & Publish Settings UI
 # ---------------------------------------------------------
-def get_youtube_auth_url() -> str:
-    """
-    Agar aapke youtube_uploader.py mein pehle se working auth URL function hai,
-    toh usko yahan import karke call kar sakti hain (state="youtube" ke saath).
-    """
-    client_id = st.secrets.get("YOUTUBE_CLIENT_ID", "")
-    params = {
-        "client_id": client_id,
-        "redirect_uri": REDIRECT_URI,
-        "response_type": "code",
-        "scope": YOUTUBE_SCOPE,
-        "access_type": "offline",
-        "prompt": "consent",
-        "state": "youtube",
-    }
-    return "https://accounts.google.com/o/oauth2/v2/auth?" + urlencode(params)
+uploaded_file = st.file_uploader("Video file chunein (MP4/MOV)", type=["mp4", "mov", "avi"])
+title = st.text_input("Video Title (YouTube ke liye)")
+caption = st.text_area("Caption / Description (Sabhi platforms ke liye)")
 
-
-def get_meta_auth_url(platform_state: str = "facebook") -> str:
-    app_id = st.secrets.get("META_APP_ID", "")
-    params = {
-        "client_id": app_id,
-        "redirect_uri": REDIRECT_URI,
-        "response_type": "code",
-        "scope": ",".join(META_SCOPES),
-        "state": platform_state,
-    }
-    if platform_state == "instagram":
-        params["auth_type"] = "reauthenticate"
-
-    return "https://www.facebook.com/v21.0/dialog/oauth?" + urlencode(params)
-
-
-# ---------------------------------------------------------
-# 4. Token Exchange Placeholders
-# ---------------------------------------------------------
-def exchange_youtube_code(code: str):
-    """
-    Apne youtube_uploader.py ke token-exchange function se real token lein.
-    """
-    if not code:
-        raise ValueError("Missing YouTube auth code.")
-    return {"code": code, "status": "connected"}
-
-
-def exchange_meta_code(code: str):
-    """
-    Apne meta_uploader.py ke token-exchange function se real token lein.
-    """
-    if not code:
-        raise ValueError("Missing Meta auth code.")
-    return {"code": code, "status": "connected"}
-
-
-# ---------------------------------------------------------
-# 5. One-Time OAuth Callback Handler
-# ---------------------------------------------------------
-def handle_oauth_callback():
-    params = st.query_params
-    code = params.get("code")
-    state = params.get("state")
-    error = params.get("error")
-
-    if error:
-        if state == "youtube":
-            st.session_state["yt_error"] = f"YouTube login error: {error}"
-            st.session_state["cb_yt"] = True
-        elif state == "facebook":
-            st.session_state["fb_error"] = f"Facebook login error: {error}"
-            st.session_state["cb_fb"] = True
-        elif state == "instagram":
-            st.session_state["ig_error"] = f"Instagram login error: {error}"
-            st.session_state["cb_ig"] = True
-        _save_persisted_connected(_current_connected_set())
-        return
-
-    if not code:
-        return
-
-    if code in st.session_state["processed_codes"]:
-        _save_persisted_connected(_current_connected_set())
-        return
-
-    st.session_state["processed_codes"].add(code)
-
-    try:
-        if state == "youtube":
-            st.session_state["yt_token"] = exchange_youtube_code(code)
-            st.session_state["yt_connected"] = True
-            st.session_state["cb_yt"] = True
-            st.session_state["yt_error"] = None
-
-        elif state == "facebook":
-            st.session_state["fb_token"] = exchange_meta_code(code)
-            st.session_state["fb_connected"] = True
-            st.session_state["cb_fb"] = True
-            st.session_state["fb_error"] = None
-
-        elif state == "instagram":
-            st.session_state["ig_token"] = exchange_meta_code(code)
-            st.session_state["ig_connected"] = True
-            st.session_state["cb_ig"] = True
-            st.session_state["ig_error"] = None
-
-    except Exception as exc:
-        if state == "youtube":
-            st.session_state["yt_error"] = f"YouTube token error: {exc}"
-            st.session_state["cb_yt"] = True
-        elif state == "facebook":
-            st.session_state["fb_error"] = f"Facebook token error: {exc}"
-            st.session_state["cb_fb"] = True
-        elif state == "instagram":
-            st.session_state["ig_error"] = f"Instagram token error: {exc}"
-            st.session_state["cb_ig"] = True
-    finally:
-        _save_persisted_connected(_current_connected_set())
-
-
-handle_oauth_callback()
-
-
-# ---------------------------------------------------------
-# 6. UI: Platform Selection & Connections
-# ---------------------------------------------------------
-st.title("Multi-Platform Video Publisher")
-st.subheader("Kahan-kahan upload karna hai?")
-
-c1, c2, c3, c4 = st.columns(4)
-with c1:
-    st.checkbox("YouTube", key="cb_yt")
-with c2:
-    st.checkbox("Facebook", key="cb_fb")
-with c3:
-    st.checkbox("Instagram", key="cb_ig")
-with c4:
-    st.checkbox("X (Twitter)", key="cb_x")
-
-st.divider()
-
-if st.session_state["cb_yt"]:
-    if st.session_state["yt_error"]:
-        st.error(st.session_state["yt_error"])
-    if st.session_state["yt_connected"]:
-        st.success("YouTube Connected")
-    elif not st.secrets.get("YOUTUBE_CLIENT_ID"):
-        st.warning("Streamlit Secrets mein `YOUTUBE_CLIENT_ID` set karein.")
-    else:
-        st.markdown(f"👉 **[Click here to Connect YouTube]({get_youtube_auth_url()})**")
-
-if st.session_state["cb_fb"]:
-    if st.session_state["fb_error"]:
-        st.error(st.session_state["fb_error"])
-    if st.session_state["fb_connected"]:
-        st.success("Facebook Connected")
-    elif not st.secrets.get("META_APP_ID"):
-        st.warning("Streamlit Secrets mein `META_APP_ID` set karein.")
-    else:
-        st.markdown(f"👉 **[Click here to Connect Facebook]({get_meta_auth_url('facebook')})**")
-
-if st.session_state["cb_ig"]:
-    if st.session_state["ig_error"]:
-        st.error(st.session_state["ig_error"])
-    if st.session_state["ig_connected"]:
-        st.success("Instagram Connected")
-    elif not st.secrets.get("META_APP_ID"):
-        st.warning("Streamlit Secrets mein `META_APP_ID` set karein.")
-    else:
-        st.markdown(f"👉 **[Click here to Connect Instagram]({get_meta_auth_url('instagram')})**")
-
-if st.session_state["cb_x"]:
-    st.info("X (Twitter) uploader integration yahan add kiya ja sakta hai.")
-
-
-# ---------------------------------------------------------
-# 7. UI: Video Details & Publishing Controls
-# ---------------------------------------------------------
-st.divider()
-st.subheader("Video Details & Publish Settings")
-
-uploaded_video = st.file_uploader("Video file select karein", type=["mp4", "mov", "avi", "mkv"])
-title = st.text_input("Title")
-caption = st.text_area("Caption / Description")
-
+st.subheader("Upload / Publish Option")
 publish_mode = st.radio(
-    "Publishing Mode",
+    "Aap video ko kaise publish karna chahte hain?",
     options=["Public", "Private", "Schedule"],
     horizontal=True,
 )
 
-scheduled_datetime = None
+schedule_iso_utc = None
+schedule_unix_ts = None
+chosen_local_dt = None
+now_local = None
+
 if publish_mode == "Schedule":
+    tz_choice = st.selectbox("Timezone", options=["Asia/Kolkata", "UTC"], index=0)
+    now_local = datetime.now(ZoneInfo(tz_choice))
+    default_date = (now_local + timedelta(days=1)).date()
+    default_time = dt_time(18, 0)
+
     d_col, t_col = st.columns(2)
     with d_col:
-        sched_date = st.date_input("Schedule Date")
+        sched_date = st.date_input("Schedule Date", value=default_date, min_value=now_local.date())
     with t_col:
-        sched_time = st.time_input("Schedule Time", value=time(12, 0))
-    scheduled_datetime = datetime.combine(sched_date, sched_time)
+        sched_time = st.time_input("Schedule Time", value=default_time)
 
-if st.button("Publish Selected Platforms", type="primary"):
-    selected = []
-    if st.session_state["cb_yt"]:
-        selected.append("YouTube")
-    if st.session_state["cb_fb"]:
-        selected.append("Facebook")
-    if st.session_state["cb_ig"]:
-        selected.append("Instagram")
-    if st.session_state["cb_x"]:
-        selected.append("X (Twitter)")
+    chosen_local_dt = datetime.combine(sched_date, sched_time).replace(tzinfo=ZoneInfo(tz_choice))
+    if chosen_local_dt <= now_local:
+        st.warning("Schedule time abhi ke samay se aage (future) ka rakhein.")
 
-    if not selected:
-        st.warning("Kam se kam ek platform select karein.")
-    elif not uploaded_video:
-        st.warning("Pehle ek video file upload karein.")
+    schedule_iso_utc = to_iso_utc(sched_date, sched_time, tz_name=tz_choice)
+    schedule_unix_ts = int(chosen_local_dt.timestamp())
+    st.caption(f"🕒 Scheduled for: {chosen_local_dt.strftime('%Y-%m-%d %H:%M')} ({tz_choice})")
+
+
+# ---------------------------------------------------------
+# Platform Selection & Persistent Connections
+# ---------------------------------------------------------
+st.subheader("Kahan-kahan upload karna hai?")
+col1, col2, col3, col4 = st.columns(4)
+with col1:
+    use_yt = st.checkbox("YouTube", key="cb_yt")
+with col2:
+    use_fb = st.checkbox("Facebook", key="cb_fb")
+with col3:
+    use_ig = st.checkbox("Instagram", key="cb_ig")
+with col4:
+    use_x = st.checkbox("X (Twitter)", key="cb_x")
+
+yt_service = st.session_state["yt_service"]
+if use_yt:
+    if yt_service is None:
+        try:
+            yt_service = get_authenticated_youtube_service()
+            st.session_state["yt_service"] = yt_service
+        except Exception as e:
+            st.error(f"❌ YouTube connect nahi ho paya: {e}")
+    if st.session_state["yt_service"] is not None:
+        yt_service = st.session_state["yt_service"]
+        st.caption("✅ YouTube connected")
+
+selected_page_id = None
+selected_page_token = None
+selected_ig_user_id = None
+
+if use_fb or use_ig:
+    if st.session_state["meta_pages"] is None:
+        try:
+            st.session_state["meta_pages"] = get_authenticated_meta_session()
+        except Exception as e:
+            st.error(f"❌ Meta (Facebook/Instagram) connect nahi ho paya: {e}")
+
+    meta_pages = st.session_state["meta_pages"] or []
+    if meta_pages:
+        page_options = {f"{p.get('name')} ({p.get('id')})": p for p in meta_pages}
+        chosen_label = st.selectbox("Apna Facebook Page chunein", options=list(page_options.keys()))
+        chosen_page = page_options[chosen_label]
+        selected_page_id = chosen_page.get("id")
+        selected_page_token = chosen_page.get("access_token")
+        ig_info = chosen_page.get("instagram_business_account") or {}
+        selected_ig_user_id = ig_info.get("id")
+
+        if use_fb:
+            st.caption(f"✅ Facebook Page connected: {chosen_page.get('name')}")
+        if use_ig:
+            if selected_ig_user_id:
+                st.caption(f"✅ Linked Instagram connected (@{ig_info.get('username', selected_ig_user_id)})")
+            else:
+                st.warning("Is Facebook Page se koi linked Instagram Business/Creator account nahi mila.")
     else:
-        st.success(
-            f"Selected: {', '.join(selected)} | Mode: {publish_mode}"
-            + (f" | Time: {scheduled_datetime}" if scheduled_datetime else "")
-        )
+        st.warning("Meta Pages load nahi hue. Kripya Meta login/permissions check karein.")
+
+_sync_persisted_connected()
+
+
+# ---------------------------------------------------------
+# Publish Action
+# ---------------------------------------------------------
+if st.button("Publish Selected Platforms"):
+    if not (use_yt or use_fb or use_ig or use_x):
+        st.warning("Kam se kam ek platform ka checkbox tick karein.")
+        st.stop()
+
+    if uploaded_file is None:
+        st.warning("Pehle ek video file upload karein.")
+        st.stop()
+
+    if use_yt and not title.strip():
+        st.warning("YouTube ke liye Title zaroori hai.")
+        st.stop()
+
+    if publish_mode == "Schedule" and use_yt and chosen_local_dt is not None and now_local is not None:
+        if chosen_local_dt <= now_local:
+            st.error("YouTube schedule ke liye future date aur time chunein.")
+            st.stop()
+
+    temp_path = "temp_upload_video.mp4"
+    with open(temp_path, "wb") as f:
+        f.write(uploaded_file.getbuffer())
+
+    try:
+        if use_yt:
+            with st.spinner("YouTube par process ho raha hai..."):
+                try:
+                    if yt_service is None:
+                        yt_service = get_authenticated_youtube_service()
+                        st.session_state["yt_service"] = yt_service
+                    res = upload_to_youtube(
+                        yt_service,
+                        temp_path,
+                        title.strip(),
+                        caption,
+                        publish_mode=publish_mode,
+                        schedule_iso_utc=schedule_iso_utc,
+                    )
+                    st.success(f"✅ YouTube ({publish_mode}) done! Video ID: {res.get('id')}")
+                except Exception as e:
+                    st.error(f"❌ YouTube failed: {e}")
+
+        if use_fb:
+            with st.spinner("Facebook par process ho raha hai..."):
+                try:
+                    res = upload_to_facebook(
+                        temp_path,
+                        title.strip() or "Video",
+                        caption,
+                        page_id=selected_page_id,
+                        page_token=selected_page_token,
+                        publish_mode=publish_mode,
+                        schedule_unix_ts=schedule_unix_ts,
+                    )
+                    st.success(f"✅ Facebook ({publish_mode}) done! ID: {res.get('id')}")
+                except Exception as e:
+                    st.error(f"❌ Facebook failed: {e}")
+
+        if use_ig:
+            with st.spinner("Instagram par process ho raha hai..."):
+                try:
+                    res = upload_to_instagram(
+                        temp_path,
+                        caption,
+                        ig_user_id=selected_ig_user_id,
+                        page_token=selected_page_token,
+                        publish_mode=publish_mode,
+                        schedule_unix_ts=schedule_unix_ts,
+                    )
+                    st.success(f"✅ Instagram ({publish_mode}) done! Media ID: {res.get('id')}")
+                except Exception as e:
+                    st.error(f"❌ Instagram failed: {e}")
+
+        if use_x:
+            with st.spinner("X (Twitter) par process ho raha hai..."):
+                try:
+                    res = upload_to_x(
+                        temp_path,
+                        caption,
+                        publish_mode=publish_mode,
+                        schedule_iso_utc=schedule_iso_utc,
+                    )
+                    st.success(f"✅ X (Twitter) ({publish_mode}) done! {res}")
+                except Exception as e:
+                    st.error(f"❌ X (Twitter) failed: {e}")
+
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
