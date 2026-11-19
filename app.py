@@ -1,6 +1,7 @@
 from datetime import datetime, time as dt_time, timedelta
 import os
 from zoneinfo import ZoneInfo
+from googleapiclient.discovery import build
 import streamlit as st
 
 from meta_uploader import (
@@ -45,6 +46,7 @@ if "cb_x" not in st.session_state:
 
 for k, default_val in [
     ("yt_service", None),
+    ("yt_credentials", None),
     ("meta_pages", None),
     ("meta_user_token", None),
     ("meta_connected", False),
@@ -59,7 +61,10 @@ process_meta_oauth_callback()
 
 def _sync_persisted_connected():
     active = set()
-    if st.session_state.get("yt_service") is not None:
+    if (
+        st.session_state.get("yt_service") is not None
+        or st.session_state.get("yt_credentials") is not None
+    ):
         active.add("youtube")
     if st.session_state.get("meta_connected") or st.session_state.get("meta_pages"):
         if st.session_state.get("cb_fb"):
@@ -130,10 +135,17 @@ with col4:
     use_x = st.checkbox("X (Twitter)", key="cb_x")
 
 yt_service = st.session_state.get("yt_service")
+yt_creds = st.session_state.get("yt_credentials")
+
 if use_yt:
+    if yt_service is None and yt_creds is not None:
+        yt_service = build("youtube", "v3", credentials=yt_creds)
+        st.session_state["yt_service"] = yt_service
+
     if yt_service is None:
         yt_service = get_authenticated_youtube_service()
         st.session_state["yt_service"] = yt_service
+
     st.caption("✅ YouTube connected")
 
 selected_page_id = None
@@ -208,9 +220,17 @@ if st.button("Publish Selected Platforms"):
         if use_yt:
             with st.spinner("YouTube par process ho raha hai..."):
                 try:
+                    if yt_service is None and st.session_state.get("yt_credentials") is not None:
+                        yt_service = build(
+                            "youtube",
+                            "v3",
+                            credentials=st.session_state["yt_credentials"],
+                        )
+                        st.session_state["yt_service"] = yt_service
                     if yt_service is None:
                         yt_service = get_authenticated_youtube_service()
                         st.session_state["yt_service"] = yt_service
+
                     res = upload_to_youtube(
                         yt_service,
                         temp_path,
