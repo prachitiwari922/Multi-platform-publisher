@@ -8,13 +8,18 @@ META_REDIRECT_URI = "https://multi-platform-publisher.streamlit.app/"
 META_AUTH_URI = f"https://www.facebook.com/{GRAPH_VERSION}/dialog/oauth"
 META_TOKEN_URI = f"https://graph.facebook.com/{GRAPH_VERSION}/oauth/access_token"
 
-# Jab Meta App mein Pages / IG permissions add/approve ho jayein, tab yahan add karein:
-# e.g. ["pages_show_list", "pages_read_engagement", "pages_manage_posts", "instagram_basic", "instagram_content_publish"]
 META_SCOPES = [
     "public_profile",
 ]
 
-META_OAUTH_QUERY_KEYS = ("code", "state", "error", "error_code", "error_description", "error_reason")
+META_OAUTH_QUERY_KEYS = (
+    "code",
+    "state",
+    "error",
+    "error_code",
+    "error_description",
+    "error_reason",
+)
 
 
 def _clear_meta_oauth_params():
@@ -74,10 +79,6 @@ def fetch_user_pages_and_ig(user_access_token):
 
 
 def process_meta_oauth_callback():
-    """
-    Facebook/Instagram OAuth redirect se aaye code/error ko handle karta hai
-    bina app ko st.stop() kiye, taaki baaki platforms aur UI safe rahein.
-    """
     state = str(st.query_params.get("state", ""))
     if not state.startswith("meta_oauth"):
         return None
@@ -127,7 +128,6 @@ def process_meta_oauth_callback():
 
 
 def get_authenticated_meta_session():
-    """Backwards-compatible helper jo cached pages ya empty list return karta hai."""
     return st.session_state.get("meta_pages") or []
 
 
@@ -141,7 +141,7 @@ def upload_to_facebook(
     schedule_unix_ts=None,
 ):
     if not page_id or not page_token:
-        raise RuntimeError("Facebook Page connection nahi mila (Page permissions / linked Page check karein).")
+        raise RuntimeError("Facebook Page connection nahi mila.")
 
     mode = publish_mode.strip().lower()
     payload = {
