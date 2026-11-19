@@ -9,7 +9,7 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
 SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
-REDIRECT_URI = "https://YOUR-NEW-APP-NAME.streamlit.app"
+REDIRECT_URI = "https://multi-platform-publisher.streamlit.app/"
 AUTH_URI = "https://accounts.google.com/o/oauth2/auth"
 TOKEN_URI = "https://oauth2.googleapis.com/token"
 
