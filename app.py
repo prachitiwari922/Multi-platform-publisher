@@ -57,32 +57,10 @@ for k, default_val in [
 # Meta OAuth callback ko widgets render hone se pehle process karein
 process_meta_oauth_callback()
 
-# Agar session mein YouTube creds hain, to yt_service turant restore karein
+# Agar URL ya session mein YouTube creds hain, to yt_service turant restore karein
 restored_creds = restore_yt_creds_from_session()
 if restored_creds is not None and st.session_state.get("yt_service") is None:
     st.session_state["yt_service"] = build("youtube", "v3", credentials=restored_creds)
-
-
-def _sync_persisted_connected():
-    active = set()
-    if (
-        st.session_state.get("yt_service") is not None
-        or st.session_state.get("yt_credentials") is not None
-        or st.session_state.get("yt_creds_dict") is not None
-    ):
-        active.add("youtube")
-    if st.session_state.get("meta_connected") or st.session_state.get("meta_pages"):
-        if st.session_state.get("cb_fb"):
-            active.add("facebook")
-        if st.session_state.get("cb_ig"):
-            active.add("instagram")
-    if st.session_state.get("cb_x"):
-        active.add("x")
-
-    if active:
-        st.query_params["connected"] = ",".join(sorted(active))
-    elif "connected" in st.query_params:
-        del st.query_params["connected"]
 
 
 uploaded_file = st.file_uploader("Video file chunein (MP4/MOV)", type=["mp4", "mov", "avi"])
@@ -184,8 +162,6 @@ if use_fb or use_ig:
                 "Meta login ho gaya hai, lekin abhi `public_profile` scope ke saath Pages list nahi aayi. "
                 "Page/Instagram upload ke liye Meta App mein Page & Instagram permissions add karein."
             )
-
-_sync_persisted_connected()
 
 if st.button("Publish Selected Platforms"):
     if not (use_yt or use_fb or use_ig or use_x):
