@@ -9,11 +9,7 @@ META_AUTH_URI = f"https://www.facebook.com/{GRAPH_VERSION}/dialog/oauth"
 META_TOKEN_URI = f"https://graph.facebook.com/{GRAPH_VERSION}/oauth/access_token"
 
 META_SCOPES = [
-    "pages_show_list",
-    "pages_read_engagement",
-    "pages_manage_posts",
-    "instagram_basic",
-    "instagram_content_publish",
+    "public_profile",
 ]
 
 
