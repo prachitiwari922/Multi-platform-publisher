@@ -20,7 +20,7 @@ st.title("🎬 Multi-Platform Video Auto-Publisher")
 
 
 # ---------------------------------------------------------
-# Helpers: Keep connections & checkboxes intact across reruns
+# 1. URL & Session Helpers (Keep connections & checkboxes safe)
 # ---------------------------------------------------------
 def _get_persisted_connected() -> set[str]:
     raw = st.query_params.get("connected", "")
@@ -29,9 +29,45 @@ def _get_persisted_connected() -> set[str]:
     return {item.strip() for item in raw.split(",") if item.strip()}
 
 
-def _sync_persisted_connected():
+def _update_url_cleanly(connected_set: set[str]):
+    """
+    'code', 'state', 'error' ko hamesha saaf rakhta hai taaki Facebook ka code
+    YouTube mein na jaye aur 'Malformed auth code' error na aaye.
+    """
+    for param in ["code", "state", "error", "scope", "authuser", "prompt"]:
+        if param in st.query_params:
+            del st.query_params[param]
+
+    if connected_set:
+        st.query_params["connected"] = ",".join(sorted(connected_set))
+    elif "connected" in st.query_params:
+        del st.query_params["connected"]
+
+
+persisted = _get_persisted_connected()
+
+if "cb_yt" not in st.session_state:
+    st.session_state["cb_yt"] = True if "youtube" in persisted else True
+if "cb_fb" not in st.session_state:
+    st.session_state["cb_fb"] = "facebook" in persisted
+if "cb_ig" not in st.session_state:
+    st.session_state["cb_ig"] = "instagram" in persisted
+if "cb_x" not in st.session_state:
+    st.session_state["cb_x"] = "x" in persisted
+
+for k in ["yt_service", "meta_pages", "yt_error", "fb_error"]:
+    if k not in st.session_state:
+        st.session_state[k] = None
+
+if "processed_oauth_codes" not in st.session_state:
+    st.session_state["processed_oauth_codes"] = set()
+
+
+def _sync_connected_state():
     active = set()
-    if st.session_state.get("yt_service") is not None:
+    if st.session_state.get("yt_service") is not None or (
+        "youtube" in persisted and not st.session_state.get("yt_error")
+    ):
         active.add("youtube")
     if st.session_state.get("meta_pages"):
         if st.session_state.get("cb_fb"):
@@ -41,42 +77,39 @@ def _sync_persisted_connected():
     if st.session_state.get("cb_x"):
         active.add("x")
 
-    # Preserve previously connected flags from URL if session just reran
-    for item in _get_persisted_connected():
-        if item == "youtube" and st.session_state.get("cb_yt"):
-            active.add("youtube")
-        elif item == "facebook" and st.session_state.get("cb_fb"):
-            active.add("facebook")
-        elif item == "instagram" and st.session_state.get("cb_ig"):
-            active.add("instagram")
-        elif item == "x" and st.session_state.get("cb_x"):
-            active.add("x")
-
-    if active:
-        st.query_params["connected"] = ",".join(sorted(active))
-    elif "connected" in st.query_params:
-        del st.query_params["connected"]
-
-
-persisted = _get_persisted_connected()
-
-if "cb_yt" not in st.session_state:
-    st.session_state["cb_yt"] = "youtube" in persisted or True
-if "cb_fb" not in st.session_state:
-    st.session_state["cb_fb"] = "facebook" in persisted
-if "cb_ig" not in st.session_state:
-    st.session_state["cb_ig"] = "instagram" in persisted
-if "cb_x" not in st.session_state:
-    st.session_state["cb_x"] = "x" in persisted
-
-if "yt_service" not in st.session_state:
-    st.session_state["yt_service"] = None
-if "meta_pages" not in st.session_state:
-    st.session_state["meta_pages"] = None
+    _update_url_cleanly(active)
 
 
 # ---------------------------------------------------------
-# Video & Publish Settings UI
+# 2. Callback Guard (Prevents cross-platform code mixup)
+# ---------------------------------------------------------
+incoming_code = st.query_params.get("code")
+incoming_state = st.query_params.get("state")
+
+if incoming_code:
+    if incoming_code in st.session_state["processed_oauth_codes"]:
+        _sync_connected_state()
+    elif incoming_state == "youtube":
+        st.session_state["processed_oauth_codes"].add(incoming_code)
+        try:
+            st.session_state["yt_service"] = get_authenticated_youtube_service()
+            st.session_state["yt_error"] = None
+            st.session_state["cb_yt"] = True
+        except Exception as e:
+            st.session_state["yt_error"] = str(e)
+        _sync_connected_state()
+    elif incoming_state in ("facebook", "instagram", None):
+        # Facebook/Instagram redirect aaya hai: YouTube code exchange ko mat chalayein
+        st.session_state["processed_oauth_codes"].add(incoming_code)
+        if incoming_state == "facebook":
+            st.session_state["cb_fb"] = True
+        elif incoming_state == "instagram":
+            st.session_state["cb_ig"] = True
+        _sync_connected_state()
+
+
+# ---------------------------------------------------------
+# 3. Video & Publish Settings UI
 # ---------------------------------------------------------
 uploaded_file = st.file_uploader("Video file chunein (MP4/MOV)", type=["mp4", "mov", "avi"])
 title = st.text_input("Video Title (YouTube ke liye)")
@@ -116,7 +149,7 @@ if publish_mode == "Schedule":
 
 
 # ---------------------------------------------------------
-# Platform Selection & Persistent Connections
+# 4. Platform Selection & Connections
 # ---------------------------------------------------------
 st.subheader("Kahan-kahan upload karna hai?")
 col1, col2, col3, col4 = st.columns(4)
@@ -129,30 +162,41 @@ with col3:
 with col4:
     use_x = st.checkbox("X (Twitter)", key="cb_x")
 
-yt_service = st.session_state["yt_service"]
+yt_service = st.session_state.get("yt_service")
 if use_yt:
-    if yt_service is None:
+    if yt_service is None and not st.session_state.get("yt_error"):
         try:
             yt_service = get_authenticated_youtube_service()
             st.session_state["yt_service"] = yt_service
         except Exception as e:
-            st.error(f"❌ YouTube connect nahi ho paya: {e}")
-    if st.session_state["yt_service"] is not None:
+            err_msg = str(e)
+            if "Malformed auth code" not in err_msg:
+                st.session_state["yt_error"] = err_msg
+
+    if st.session_state.get("yt_service") is not None:
         yt_service = st.session_state["yt_service"]
         st.caption("✅ YouTube connected")
+    elif st.session_state.get("yt_error"):
+        st.error(f"YouTube token error: {st.session_state['yt_error']}")
+        if st.button("YouTube dobara connect karein"):
+            st.session_state["yt_error"] = None
+            st.session_state["yt_service"] = None
+            _update_url_cleanly(_get_persisted_connected() - {"youtube"})
+            st.rerun()
 
 selected_page_id = None
 selected_page_token = None
 selected_ig_user_id = None
 
 if use_fb or use_ig:
-    if st.session_state["meta_pages"] is None:
+    if st.session_state.get("meta_pages") is None:
         try:
             st.session_state["meta_pages"] = get_authenticated_meta_session()
+            _sync_connected_state()
         except Exception as e:
             st.error(f"❌ Meta (Facebook/Instagram) connect nahi ho paya: {e}")
 
-    meta_pages = st.session_state["meta_pages"] or []
+    meta_pages = st.session_state.get("meta_pages") or []
     if meta_pages:
         page_options = {f"{p.get('name')} ({p.get('id')})": p for p in meta_pages}
         chosen_label = st.selectbox("Apna Facebook Page chunein", options=list(page_options.keys()))
@@ -172,11 +216,11 @@ if use_fb or use_ig:
     else:
         st.warning("Meta Pages load nahi hue. Kripya Meta login/permissions check karein.")
 
-_sync_persisted_connected()
+_sync_connected_state()
 
 
 # ---------------------------------------------------------
-# Publish Action
+# 5. Publish Selected Platforms
 # ---------------------------------------------------------
 if st.button("Publish Selected Platforms"):
     if not (use_yt or use_fb or use_ig or use_x):
