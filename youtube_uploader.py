@@ -12,6 +12,14 @@ SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
 REDIRECT_URI = "https://multi-platform-publisher.streamlit.app/"
 AUTH_URI = "https://accounts.google.com/o/oauth2/auth"
 TOKEN_URI = "https://oauth2.googleapis.com/token"
+OAUTH_QUERY_KEYS = ("code", "state", "error", "scope", "authuser", "prompt")
+
+
+def _clear_oauth_query_params():
+    """Sirf OAuth params hatata hai, baaki query params (jaise 'connected') ko bachaye rakhta hai."""
+    for key in OAUTH_QUERY_KEYS:
+        if key in st.query_params:
+            del st.query_params[key]
 
 
 def to_iso_utc(schedule_date, schedule_time, tz_name="Asia/Kolkata"):
@@ -39,15 +47,20 @@ def get_auth_url(client_id):
         "access_type": "offline",
         "prompt": "consent",
         "include_granted_scopes": "true",
+        "state": "youtube",
     }
     return f"{AUTH_URI}?{urlencode(params)}"
 
 
 def exchange_code_for_creds(auth_code, client_id, client_secret):
+    clean_code = str(auth_code).strip()
+    if not clean_code:
+        raise RuntimeError("Empty auth code received.")
+
     resp = requests.post(
         TOKEN_URI,
         data={
-            "code": auth_code,
+            "code": clean_code,
             "client_id": client_id,
             "client_secret": client_secret,
             "redirect_uri": REDIRECT_URI,
@@ -85,28 +98,35 @@ def get_authenticated_youtube_service():
             st.session_state.pop("yt_credentials", None)
 
     auth_url = get_auth_url(client_id)
+    oauth_state = st.query_params.get("state")
     oauth_error = st.query_params.get("error")
     auth_code = st.query_params.get("code")
     used_codes = st.session_state.setdefault("yt_used_codes", set())
 
+    # Agar callback kisi aur platform (jaise facebook/instagram) ka hai, toh YouTube code exchange na karein
+    if oauth_state and oauth_state != "youtube":
+        st.markdown(f"### 👉 [Click here to Connect YouTube]({auth_url})")
+        st.stop()
+
     if oauth_error:
-        st.query_params.clear()
+        _clear_oauth_query_params()
         st.error(f"YouTube login error: {oauth_error}")
         st.markdown(f"### 👉 [Click here to Connect YouTube]({auth_url})")
         st.stop()
 
     if auth_code:
         if auth_code in used_codes:
-            st.query_params.clear()
+            _clear_oauth_query_params()
             st.rerun()
+
         used_codes.add(auth_code)
         try:
             new_creds = exchange_code_for_creds(auth_code, client_id, client_secret)
             st.session_state["yt_credentials"] = new_creds
-            st.query_params.clear()
+            _clear_oauth_query_params()
             st.rerun()
         except Exception as e:
-            st.query_params.clear()
+            _clear_oauth_query_params()
             st.error(f"YouTube token error: {e}")
             st.markdown(f"### 👉 [Click here to Connect YouTube]({auth_url})")
             st.stop()
