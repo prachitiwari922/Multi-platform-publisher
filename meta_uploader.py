@@ -8,27 +8,36 @@ META_REDIRECT_URI = "https://multi-platform-publisher.streamlit.app/"
 META_AUTH_URI = f"https://www.facebook.com/{GRAPH_VERSION}/dialog/oauth"
 META_TOKEN_URI = f"https://graph.facebook.com/{GRAPH_VERSION}/oauth/access_token"
 
+# Jab Meta App mein Pages / IG permissions add/approve ho jayein, tab yahan add karein:
+# e.g. ["pages_show_list", "pages_read_engagement", "pages_manage_posts", "instagram_basic", "instagram_content_publish"]
 META_SCOPES = [
     "public_profile",
 ]
+
+META_OAUTH_QUERY_KEYS = ("code", "state", "error", "error_code", "error_description", "error_reason")
+
+
+def _clear_meta_oauth_params():
+    for key in META_OAUTH_QUERY_KEYS:
+        if key in st.query_params:
+            del st.query_params[key]
 
 
 def get_meta_app_creds():
     app_id = str(st.secrets.get("META_APP_ID", "")).strip()
     app_secret = str(st.secrets.get("META_APP_SECRET", "")).strip()
-    if not app_id or not app_secret:
-        st.error("Secrets mein META_APP_ID aur META_APP_SECRET daalein.")
-        st.stop()
     return app_id, app_secret
 
 
-def get_meta_auth_url(app_id):
+def get_meta_auth_url(app_id, platform_hint="facebook"):
     params = {
         "client_id": app_id,
         "redirect_uri": META_REDIRECT_URI,
-        "state": "meta_oauth",
+        "state": f"meta_oauth:{platform_hint}",
         "scope": ",".join(META_SCOPES),
     }
+    if platform_hint == "instagram":
+        params["auth_type"] = "reauthenticate"
     return f"{META_AUTH_URI}?{urlencode(params)}"
 
 
@@ -59,53 +68,67 @@ def fetch_user_pages_and_ig(user_access_token):
         timeout=30,
     )
     data = resp.json()
-    if resp.status_code >= 400 or "data" not in data:
+    if resp.status_code >= 400:
         raise RuntimeError(data.get("error", {}).get("message") or str(data))
-    return data["data"]
+    return data.get("data", [])
 
 
-def get_authenticated_meta_session():
-    app_id, app_secret = get_meta_app_creds()
+def process_meta_oauth_callback():
+    """
+    Facebook/Instagram OAuth redirect se aaye code/error ko handle karta hai
+    bina app ko st.stop() kiye, taaki baaki platforms aur UI safe rahein.
+    """
+    state = str(st.query_params.get("state", ""))
+    if not state.startswith("meta_oauth"):
+        return None
 
-    if st.session_state.get("meta_pages"):
-        return st.session_state["meta_pages"]
-
-    auth_url = get_meta_auth_url(app_id)
-    oauth_state = st.query_params.get("state")
-    oauth_error = st.query_params.get("error")
+    platform_hint = state.split(":", 1)[1] if ":" in state else "facebook"
+    oauth_error = st.query_params.get("error_description") or st.query_params.get("error")
     auth_code = st.query_params.get("code")
     used_codes = st.session_state.setdefault("meta_used_codes", set())
 
-    if oauth_state == "meta_oauth" and oauth_error:
-        st.query_params.clear()
-        st.error(f"Meta login error: {oauth_error}")
-        st.markdown(f"### 👉 [Click here to Connect Facebook & Instagram]({auth_url})")
-        st.stop()
+    if oauth_error:
+        _clear_meta_oauth_params()
+        st.session_state["meta_error"] = f"Meta login error: {oauth_error}"
+        return platform_hint
 
-    if oauth_state == "meta_oauth" and auth_code:
+    if auth_code:
         if auth_code in used_codes:
-            st.query_params.clear()
-            st.rerun()
+            _clear_meta_oauth_params()
+            return platform_hint
+
         used_codes.add(auth_code)
+        app_id, app_secret = get_meta_app_creds()
+        if not app_id or not app_secret:
+            _clear_meta_oauth_params()
+            st.session_state["meta_error"] = "Secrets mein META_APP_ID aur META_APP_SECRET daalein."
+            return platform_hint
+
         try:
             user_token = exchange_meta_code(auth_code, app_id, app_secret)
             pages = fetch_user_pages_and_ig(user_token)
-            if not pages:
-                st.query_params.clear()
-                st.warning("Is Meta account se koi connected Facebook Page nahi mila.")
-                st.markdown(f"### 👉 [Click here to Connect Facebook & Instagram]({auth_url})")
-                st.stop()
+            st.session_state["meta_user_token"] = user_token
             st.session_state["meta_pages"] = pages
-            st.query_params.clear()
-            st.rerun()
+            st.session_state["meta_connected"] = True
+            st.session_state["meta_error"] = None
+            if platform_hint == "facebook":
+                st.session_state["cb_fb"] = True
+            elif platform_hint == "instagram":
+                st.session_state["cb_ig"] = True
         except Exception as e:
-            st.query_params.clear()
-            st.error(f"Meta connection error: {e}")
-            st.markdown(f"### 👉 [Click here to Connect Facebook & Instagram]({auth_url})")
-            st.stop()
+            st.session_state["meta_error"] = f"Meta connection error: {e}"
+        finally:
+            _clear_meta_oauth_params()
 
-    st.markdown(f"### 👉 [Click here to Connect Facebook & Instagram]({auth_url})")
-    st.stop()
+        return platform_hint
+
+    _clear_meta_oauth_params()
+    return platform_hint
+
+
+def get_authenticated_meta_session():
+    """Backwards-compatible helper jo cached pages ya empty list return karta hai."""
+    return st.session_state.get("meta_pages") or []
 
 
 def upload_to_facebook(
@@ -118,7 +141,7 @@ def upload_to_facebook(
     schedule_unix_ts=None,
 ):
     if not page_id or not page_token:
-        raise RuntimeError("Facebook Page connection nahi mila.")
+        raise RuntimeError("Facebook Page connection nahi mila (Page permissions / linked Page check karein).")
 
     mode = publish_mode.strip().lower()
     payload = {
