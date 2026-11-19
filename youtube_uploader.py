@@ -16,10 +16,44 @@ OAUTH_QUERY_KEYS = ("code", "state", "error", "scope", "authuser", "prompt")
 
 
 def _clear_oauth_query_params():
-    """Sirf OAuth params hatata hai, baaki query params (jaise 'connected') ko bachaye rakhta hai."""
     for key in OAUTH_QUERY_KEYS:
         if key in st.query_params:
             del st.query_params[key]
+
+
+def _creds_to_dict(creds: Credentials) -> dict:
+    return {
+        "token": creds.token,
+        "refresh_token": creds.refresh_token,
+        "token_uri": creds.token_uri or TOKEN_URI,
+        "client_id": creds.client_id,
+        "client_secret": creds.client_secret,
+        "scopes": list(creds.scopes or SCOPES),
+    }
+
+
+def _dict_to_creds(data: dict) -> Credentials | None:
+    if not data or not data.get("token"):
+        return None
+    return Credentials(
+        token=data["token"],
+        refresh_token=data.get("refresh_token"),
+        token_uri=data.get("token_uri") or TOKEN_URI,
+        client_id=data.get("client_id"),
+        client_secret=data.get("client_secret"),
+        scopes=data.get("scopes") or SCOPES,
+    )
+
+
+def restore_yt_creds_from_session():
+    creds = st.session_state.get("yt_credentials")
+    if isinstance(creds, Credentials):
+        return creds
+    creds_dict = st.session_state.get("yt_creds_dict")
+    restored = _dict_to_creds(creds_dict) if creds_dict else None
+    if restored:
+        st.session_state["yt_credentials"] = restored
+    return restored
 
 
 def to_iso_utc(schedule_date, schedule_time, tz_name="Asia/Kolkata"):
@@ -84,18 +118,21 @@ def exchange_code_for_creds(auth_code, client_id, client_secret):
 
 def get_authenticated_youtube_service():
     client_id, client_secret = get_yt_creds()
-    creds = st.session_state.get("yt_credentials")
+    creds = restore_yt_creds_from_session()
 
     if creds and creds.valid:
+        st.session_state["yt_creds_dict"] = _creds_to_dict(creds)
         return build("youtube", "v3", credentials=creds)
 
     if creds and creds.expired and creds.refresh_token:
         try:
             creds.refresh(Request())
             st.session_state["yt_credentials"] = creds
+            st.session_state["yt_creds_dict"] = _creds_to_dict(creds)
             return build("youtube", "v3", credentials=creds)
         except Exception:
             st.session_state.pop("yt_credentials", None)
+            st.session_state.pop("yt_creds_dict", None)
 
     auth_url = get_auth_url(client_id)
     oauth_state = st.query_params.get("state")
@@ -103,7 +140,6 @@ def get_authenticated_youtube_service():
     auth_code = st.query_params.get("code")
     used_codes = st.session_state.setdefault("yt_used_codes", set())
 
-    # Agar callback kisi aur platform (jaise facebook/instagram) ka hai, toh YouTube code exchange na karein
     if oauth_state and oauth_state != "youtube":
         st.markdown(f"### 👉 [Click here to Connect YouTube]({auth_url})")
         st.stop()
@@ -123,6 +159,7 @@ def get_authenticated_youtube_service():
         try:
             new_creds = exchange_code_for_creds(auth_code, client_id, client_secret)
             st.session_state["yt_credentials"] = new_creds
+            st.session_state["yt_creds_dict"] = _creds_to_dict(new_creds)
             _clear_oauth_query_params()
             st.rerun()
         except Exception as e:
