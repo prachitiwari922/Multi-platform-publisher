@@ -1,4 +1,6 @@
+import base64
 from datetime import datetime, time as dt_time, timezone
+import json
 from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
 import requests
@@ -16,6 +18,7 @@ OAUTH_QUERY_KEYS = ("code", "state", "error", "scope", "authuser", "prompt")
 
 
 def _clear_oauth_query_params():
+    # Sirf OAuth temporary params hatayein; 'connected' aur 'yt_token' ko chhua bhi na jaye
     for key in OAUTH_QUERY_KEYS:
         if key in st.query_params:
             del st.query_params[key]
@@ -45,11 +48,50 @@ def _dict_to_creds(data: dict) -> Credentials | None:
     )
 
 
-def restore_yt_creds_from_session():
+def _encode_creds_param(creds_dict: dict) -> str:
+    raw = json.dumps(creds_dict, separators=(",", ":")).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii")
+
+
+def _decode_creds_param(encoded: str) -> dict | None:
+    if not encoded:
+        return None
+    try:
+        padded = encoded + "=" * (-len(encoded) % 4)
+        raw = base64.urlsafe_b64decode(padded.encode("ascii"))
+        data = json.loads(raw.decode("utf-8"))
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def _save_yt_creds(creds: Credentials):
+    creds_dict = _creds_to_dict(creds)
+    st.session_state["yt_credentials"] = creds
+    st.session_state["yt_creds_dict"] = creds_dict
+    try:
+        st.query_params["yt_token"] = _encode_creds_param(creds_dict)
+    except Exception:
+        pass
+
+
+def restore_yt_creds_from_session() -> Credentials | None:
     creds = st.session_state.get("yt_credentials")
-    if isinstance(creds, Credentials):
+    if isinstance(creds, Credentials) and creds.token:
+        if "yt_token" not in st.query_params:
+            try:
+                st.query_params["yt_token"] = _encode_creds_param(_creds_to_dict(creds))
+            except Exception:
+                pass
         return creds
+
     creds_dict = st.session_state.get("yt_creds_dict")
+    if not creds_dict:
+        qp_token = st.query_params.get("yt_token", "")
+        creds_dict = _decode_creds_param(qp_token)
+        if creds_dict:
+            st.session_state["yt_creds_dict"] = creds_dict
+
     restored = _dict_to_creds(creds_dict) if creds_dict else None
     if restored:
         st.session_state["yt_credentials"] = restored
@@ -121,18 +163,19 @@ def get_authenticated_youtube_service():
     creds = restore_yt_creds_from_session()
 
     if creds and creds.valid:
-        st.session_state["yt_creds_dict"] = _creds_to_dict(creds)
+        _save_yt_creds(creds)
         return build("youtube", "v3", credentials=creds)
 
     if creds and creds.expired and creds.refresh_token:
         try:
             creds.refresh(Request())
-            st.session_state["yt_credentials"] = creds
-            st.session_state["yt_creds_dict"] = _creds_to_dict(creds)
+            _save_yt_creds(creds)
             return build("youtube", "v3", credentials=creds)
         except Exception:
             st.session_state.pop("yt_credentials", None)
             st.session_state.pop("yt_creds_dict", None)
+            if "yt_token" in st.query_params:
+                del st.query_params["yt_token"]
 
     auth_url = get_auth_url(client_id)
     oauth_state = st.query_params.get("state")
@@ -158,8 +201,7 @@ def get_authenticated_youtube_service():
         used_codes.add(auth_code)
         try:
             new_creds = exchange_code_for_creds(auth_code, client_id, client_secret)
-            st.session_state["yt_credentials"] = new_creds
-            st.session_state["yt_creds_dict"] = _creds_to_dict(new_creds)
+            _save_yt_creds(new_creds)
             _clear_oauth_query_params()
             st.rerun()
         except Exception as e:
