@@ -3,14 +3,26 @@ from urllib.parse import urlencode
 import requests
 import streamlit as st
 
+import token_store
+
 GRAPH_VERSION = "v21.0"
 META_REDIRECT_URI = "https://multi-platform-publisher.streamlit.app/"
 META_AUTH_URI = f"https://www.facebook.com/{GRAPH_VERSION}/dialog/oauth"
 META_TOKEN_URI = f"https://graph.facebook.com/{GRAPH_VERSION}/oauth/access_token"
 
+# These must also be added to your Meta App (Use cases / Permissions).
+# In Development mode they work for app admins/testers without App Review.
 META_SCOPES = [
     "public_profile",
+    "pages_show_list",
+    "pages_read_engagement",
+    "pages_manage_posts",
+    "publish_video",
+    "instagram_basic",
+    "instagram_content_publish",
+    "business_management",
 ]
+STORE_KEY = "meta"
 
 META_OAUTH_QUERY_KEYS = (
     "code",
@@ -63,6 +75,26 @@ def exchange_meta_code(code, app_id, app_secret):
     return data["access_token"]
 
 
+def exchange_long_lived(short_token, app_id, app_secret):
+    """Short-lived (~1-2h) user token -> long-lived (~60 days). Page tokens
+    fetched with a long-lived user token do not expire."""
+    try:
+        resp = requests.get(
+            META_TOKEN_URI,
+            params={
+                "grant_type": "fb_exchange_token",
+                "client_id": app_id,
+                "client_secret": app_secret,
+                "fb_exchange_token": short_token,
+            },
+            timeout=30,
+        )
+        data = resp.json()
+        return data.get("access_token") or short_token
+    except Exception:
+        return short_token
+
+
 def fetch_user_pages_and_ig(user_access_token):
     resp = requests.get(
         f"https://graph.facebook.com/{GRAPH_VERSION}/me/accounts",
@@ -107,7 +139,9 @@ def process_meta_oauth_callback():
 
         try:
             user_token = exchange_meta_code(auth_code, app_id, app_secret)
+            user_token = exchange_long_lived(user_token, app_id, app_secret)
             pages = fetch_user_pages_and_ig(user_token)
+            token_store.save(STORE_KEY, {"user_token": user_token, "pages": pages})
             st.session_state["meta_user_token"] = user_token
             st.session_state["meta_pages"] = pages
             st.session_state["meta_connected"] = True
@@ -125,6 +159,24 @@ def process_meta_oauth_callback():
 
     _clear_meta_oauth_params()
     return platform_hint
+
+
+def restore_meta_from_store():
+    """Reload Meta login from the server-side store after a redirect/refresh."""
+    if st.session_state.get("meta_connected"):
+        return
+    data = token_store.load(STORE_KEY)
+    if data and data.get("user_token"):
+        st.session_state["meta_user_token"] = data["user_token"]
+        st.session_state["meta_pages"] = data.get("pages") or []
+        st.session_state["meta_connected"] = True
+
+
+def disconnect_meta():
+    st.session_state["meta_user_token"] = None
+    st.session_state["meta_pages"] = None
+    st.session_state["meta_connected"] = False
+    token_store.remove(STORE_KEY)
 
 
 def get_authenticated_meta_session():
