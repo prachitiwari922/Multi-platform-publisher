@@ -1,181 +1,111 @@
-from datetime import datetime, time as dt_time, timedelta
-import os
-from zoneinfo import ZoneInfo
 import streamlit as st
 
-from meta_uploader import (
-    get_authenticated_meta_session,
-    upload_to_facebook,
-    upload_to_instagram,
-)
-from x_uploader import upload_to_x
-from youtube_uploader import (
-    get_authenticated_youtube_service,
-    to_iso_utc,
-    upload_to_youtube,
-)
+st.set_page_config(page_title="Multi-Platform Publisher", layout="centered")
 
-st.set_page_config(page_title="Multi-Platform Video Publisher", page_icon="🎬")
-st.title("🎬 Multi-Platform Video Auto-Publisher")
+# 1. Session state initialize karein (taaki rerun ya dusre platform par jaane par state na ude)
+defaults = {
+    "yt_connected": False,
+    "fb_connected": False,
+    "ig_connected": False,
+    "x_connected": False,
+    "yt_token": None,
+    "fb_token": None,
+    "yt_error": None,
+    "fb_error": None,
+    "cb_yt": False,
+    "cb_fb": False,
+    "cb_ig": False,
+    "cb_x": False,
+    "processed_codes": set(),
+}
 
-uploaded_file = st.file_uploader("Video file chunein (MP4/MOV)", type=["mp4", "mov", "avi"])
-title = st.text_input("Video Title (YouTube ke liye)")
-caption = st.text_area("Caption / Description (Sabhi platforms ke liye)")
+for k, v in defaults.items():
+    if k not in st.session_state:
+        st.session_state[k] = set() if isinstance(v, set) else v
 
-st.subheader("Upload / Publish Option")
-publish_mode = st.radio(
-    "Aap video ko kaise publish karna chahte hain?",
-    options=["Public", "Private", "Schedule"],
-    horizontal=True,
-)
 
-schedule_iso_utc = None
-schedule_unix_ts = None
-chosen_local_dt = None
-now_local = None
+def handle_oauth_callback():
+    """
+    URL se aaye OAuth code ko sirf ek baar process karke session_state mein save karta hai,
+    aur phir query_params clear kar deta hai taaki agle rerun par 'Malformed auth code' na aaye.
+    """
+    params = st.query_params
+    code = params.get("code")
+    state = params.get("state")
 
-if publish_mode == "Schedule":
-    tz_choice = st.selectbox("Timezone", options=["Asia/Kolkata", "UTC"], index=0)
-    now_local = datetime.now(ZoneInfo(tz_choice))
-    default_date = (now_local + timedelta(days=1)).date()
-    default_time = dt_time(18, 0)
+    if not code:
+        return
 
-    d_col, t_col = st.columns(2)
-    with d_col:
-        sched_date = st.date_input("Schedule Date", value=default_date, min_value=now_local.date())
-    with t_col:
-        sched_time = st.time_input("Schedule Time", value=default_time)
+    # Agar yeh code pehle hi process ho chuka hai toh dobara exchange na karein
+    if code in st.session_state["processed_codes"]:
+        st.query_params.clear()
+        return
 
-    chosen_local_dt = datetime.combine(sched_date, sched_time).replace(tzinfo=ZoneInfo(tz_choice))
-    if chosen_local_dt <= now_local:
-        st.warning("Schedule time abhi ke samay se aage (future) ka rakhein.")
-
-    schedule_iso_utc = to_iso_utc(sched_date, sched_time, tz_name=tz_choice)
-    schedule_unix_ts = int(chosen_local_dt.timestamp())
-    st.caption(f"🕒 Scheduled for: {chosen_local_dt.strftime('%Y-%m-%d %H:%M')} ({tz_choice})")
-
-st.subheader("Kahan-kahan upload karna hai?")
-col1, col2, col3, col4 = st.columns(4)
-with col1:
-    use_yt = st.checkbox("YouTube", value=True)
-with col2:
-    use_fb = st.checkbox("Facebook", value=False)
-with col3:
-    use_ig = st.checkbox("Instagram", value=False)
-with col4:
-    use_x = st.checkbox("X (Twitter)", value=False)
-
-yt_service = None
-if use_yt:
-    yt_service = get_authenticated_youtube_service()
-    st.caption("✅ YouTube connected")
-
-selected_page_id = None
-selected_page_token = None
-selected_ig_user_id = None
-
-if use_fb or use_ig:
-    meta_pages = get_authenticated_meta_session()
-    page_options = {
-        f"{p.get('name')} ({p.get('id')})": p for p in meta_pages
-    }
-    chosen_label = st.selectbox("Apna Facebook Page chunein", options=list(page_options.keys()))
-    chosen_page = page_options[chosen_label]
-    selected_page_id = chosen_page.get("id")
-    selected_page_token = chosen_page.get("access_token")
-    ig_info = chosen_page.get("instagram_business_account") or {}
-    selected_ig_user_id = ig_info.get("id")
-
-    if use_fb:
-        st.caption(f"✅ Facebook Page connected: {chosen_page.get('name')}")
-    if use_ig:
-        if selected_ig_user_id:
-            st.caption(f"✅ Linked Instagram connected (@{ig_info.get('username', selected_ig_user_id)})")
-        else:
-            st.warning("Is Facebook Page se koi linked Instagram Business/Creator account nahi mila.")
-
-if st.button("Publish Selected Platforms"):
-    if not (use_yt or use_fb or use_ig or use_x):
-        st.warning("Kam se kam ek platform ka checkbox tick karein.")
-        st.stop()
-
-    if uploaded_file is None:
-        st.warning("Pehle ek video file upload karein.")
-        st.stop()
-
-    if use_yt and not title.strip():
-        st.warning("YouTube ke liye Title zaroori hai.")
-        st.stop()
-
-    if publish_mode == "Schedule" and use_yt and chosen_local_dt is not None and now_local is not None:
-        if chosen_local_dt <= now_local:
-            st.error("YouTube schedule ke liye future date aur time chunein.")
-            st.stop()
-
-    temp_path = "temp_upload_video.mp4"
-    with open(temp_path, "wb") as f:
-        f.write(uploaded_file.getbuffer())
+    st.session_state["processed_codes"].add(code)
 
     try:
-        if use_yt:
-            with st.spinner("YouTube par process ho raha hai..."):
-                try:
-                    res = upload_to_youtube(
-                        yt_service,
-                        temp_path,
-                        title.strip(),
-                        caption,
-                        publish_mode=publish_mode,
-                        schedule_iso_utc=schedule_iso_utc,
-                    )
-                    st.success(f"✅ YouTube ({publish_mode}) done! Video ID: {res.get('id')}")
-                except Exception as e:
-                    st.error(f"❌ YouTube failed: {e}")
+        if state == "youtube":
+            # Yahan apne youtube_uploader.py ka token exchange function call karein:
+            # token = exchange_youtube_code(code)
+            token = {"auth_code_used": code}
+            st.session_state["yt_token"] = token
+            st.session_state["yt_connected"] = True
+            st.session_state["cb_yt"] = True
+            st.session_state["yt_error"] = None
 
-        if use_fb:
-            with st.spinner("Facebook par process ho raha hai..."):
-                try:
-                    res = upload_to_facebook(
-                        temp_path,
-                        title.strip() or "Video",
-                        caption,
-                        page_id=selected_page_id,
-                        page_token=selected_page_token,
-                        publish_mode=publish_mode,
-                        schedule_unix_ts=schedule_unix_ts,
-                    )
-                    st.success(f"✅ Facebook ({publish_mode}) done! ID: {res.get('id')}")
-                except Exception as e:
-                    st.error(f"❌ Facebook failed: {e}")
+        elif state == "facebook":
+            # Yahan apne meta_uploader.py ka token exchange function call karein:
+            # token = exchange_meta_code(code)
+            token = {"auth_code_used": code}
+            st.session_state["fb_token"] = token
+            st.session_state["fb_connected"] = True
+            st.session_state["cb_fb"] = True
+            st.session_state["fb_error"] = None
 
-        if use_ig:
-            with st.spinner("Instagram par process ho raha hai..."):
-                try:
-                    res = upload_to_instagram(
-                        temp_path,
-                        caption,
-                        ig_user_id=selected_ig_user_id,
-                        page_token=selected_page_token,
-                        publish_mode=publish_mode,
-                        schedule_unix_ts=schedule_unix_ts,
-                    )
-                    st.success(f"✅ Instagram ({publish_mode}) done! Media ID: {res.get('id')}")
-                except Exception as e:
-                    st.error(f"❌ Instagram failed: {e}")
-
-        if use_x:
-            with st.spinner("X (Twitter) par process ho raha hai..."):
-                try:
-                    res = upload_to_x(
-                        temp_path,
-                        caption,
-                        publish_mode=publish_mode,
-                        schedule_iso_utc=schedule_iso_utc,
-                    )
-                    st.success(f"✅ X (Twitter) ({publish_mode}) done! {res}")
-                except Exception as e:
-                    st.error(f"❌ X (Twitter) failed: {e}")
-
+    except Exception as e:
+        if state == "youtube":
+            st.session_state["yt_error"] = f"YouTube token error: {e}"
+        elif state == "facebook":
+            st.session_state["fb_error"] = f"Facebook token error: {e}"
     finally:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
+        # Sabse zaroori: code use hone ke baad URL params saaf karein
+        st.query_params.clear()
+
+
+handle_oauth_callback()
+
+st.subheader("Kahan-kahan upload karna hai?")
+
+col1, col2, col3, col4 = st.columns(4)
+with col1:
+    st.checkbox("YouTube", key="cb_yt")
+with col2:
+    st.checkbox("Facebook", key="cb_fb")
+with col3:
+    st.checkbox("Instagram", key="cb_ig")
+with col4:
+    st.checkbox("X (Twitter)", key="cb_x")
+
+# YouTube section
+if st.session_state["cb_yt"]:
+    if st.session_state["yt_error"]:
+        st.error(st.session_state["yt_error"])
+
+    if st.session_state["yt_connected"]:
+        st.success("YouTube Connected ✅ (Tick aur session safe hai)")
+    else:
+        # Yahan apni youtube_uploader.py se auth_url banayein jisme state="youtube" ho
+        yt_auth_url = "https://accounts.google.com/o/oauth2/v2/auth?state=youtube"
+        st.markdown(f"👉 **[Click here to Connect YouTube]({yt_auth_url})**")
+
+# Facebook section
+if st.session_state["cb_fb"]:
+    if st.session_state["fb_error"]:
+        st.error(st.session_state["fb_error"])
+
+    if st.session_state["fb_connected"]:
+        st.success("Facebook Connected ✅")
+    else:
+        # Yahan apni meta_uploader.py se auth_url banayein jisme state="facebook" ho
+        fb_auth_url = "https://www.facebook.com/v21.0/dialog/oauth?state=facebook"
+        st.markdown(f"👉 **[Click here to Connect Facebook]({fb_auth_url})**")
