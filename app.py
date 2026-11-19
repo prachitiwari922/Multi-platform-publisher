@@ -2,6 +2,9 @@ from datetime import datetime, time
 from urllib.parse import urlencode
 import streamlit as st
 
+# ---------------------------------------------------------
+# 1. App Configuration & Constants
+# ---------------------------------------------------------
 st.set_page_config(page_title="Multi-Platform Publisher", layout="centered")
 
 REDIRECT_URI = "https://multi-platform-publisher.streamlit.app"
@@ -9,6 +12,9 @@ YOUTUBE_SCOPE = "https://www.googleapis.com/auth/youtube.upload"
 META_SCOPES = ["public_profile"]
 
 
+# ---------------------------------------------------------
+# 2. URL & Session State Helpers (Keep all connections intact)
+# ---------------------------------------------------------
 def _get_persisted_connected() -> set[str]:
     raw = st.query_params.get("connected", "")
     if not raw:
@@ -17,13 +23,24 @@ def _get_persisted_connected() -> set[str]:
 
 
 def _save_persisted_connected(connected_set: set[str]):
-    # 'code', 'state', 'error' hata kar sirf 'connected' rakhein
     st.query_params.clear()
     if connected_set:
         st.query_params["connected"] = ",".join(sorted(connected_set))
 
 
-# Session state initialize + URL se persisted connections restore
+def _current_connected_set() -> set[str]:
+    active = set()
+    if st.session_state.get("yt_connected"):
+        active.add("youtube")
+    if st.session_state.get("fb_connected"):
+        active.add("facebook")
+    if st.session_state.get("ig_connected"):
+        active.add("instagram")
+    if st.session_state.get("x_connected"):
+        active.add("x")
+    return active
+
+
 persisted = _get_persisted_connected()
 
 DEFAULTS = {
@@ -53,7 +70,14 @@ for key, value in DEFAULTS.items():
         st.session_state[key] = True
 
 
+# ---------------------------------------------------------
+# 3. OAuth URL Builders
+# ---------------------------------------------------------
 def get_youtube_auth_url() -> str:
+    """
+    Agar aapke youtube_uploader.py mein pehle se working auth URL function hai,
+    toh usko yahan import karke call kar sakti hain (state="youtube" ke saath).
+    """
     client_id = st.secrets.get("YOUTUBE_CLIENT_ID", "")
     params = {
         "client_id": client_id,
@@ -76,34 +100,36 @@ def get_meta_auth_url(platform_state: str = "facebook") -> str:
         "scope": ",".join(META_SCOPES),
         "state": platform_state,
     }
+    if platform_state == "instagram":
+        params["auth_type"] = "reauthenticate"
+
     return "https://www.facebook.com/v21.0/dialog/oauth?" + urlencode(params)
 
 
+# ---------------------------------------------------------
+# 4. Token Exchange Placeholders
+# ---------------------------------------------------------
 def exchange_youtube_code(code: str):
+    """
+    Apne youtube_uploader.py ke token-exchange function se real token lein.
+    """
     if not code:
         raise ValueError("Missing YouTube auth code.")
     return {"code": code, "status": "connected"}
 
 
 def exchange_meta_code(code: str):
+    """
+    Apne meta_uploader.py ke token-exchange function se real token lein.
+    """
     if not code:
         raise ValueError("Missing Meta auth code.")
     return {"code": code, "status": "connected"}
 
 
-def _current_connected_set() -> set[str]:
-    active = set()
-    if st.session_state.get("yt_connected"):
-        active.add("youtube")
-    if st.session_state.get("fb_connected"):
-        active.add("facebook")
-    if st.session_state.get("ig_connected"):
-        active.add("instagram")
-    if st.session_state.get("x_connected"):
-        active.add("x")
-    return active
-
-
+# ---------------------------------------------------------
+# 5. One-Time OAuth Callback Handler
+# ---------------------------------------------------------
 def handle_oauth_callback():
     params = st.query_params
     code = params.get("code")
@@ -167,6 +193,10 @@ def handle_oauth_callback():
 
 handle_oauth_callback()
 
+
+# ---------------------------------------------------------
+# 6. UI: Platform Selection & Connections
+# ---------------------------------------------------------
 st.title("Multi-Platform Video Publisher")
 st.subheader("Kahan-kahan upload karna hai?")
 
@@ -215,6 +245,10 @@ if st.session_state["cb_ig"]:
 if st.session_state["cb_x"]:
     st.info("X (Twitter) uploader integration yahan add kiya ja sakta hai.")
 
+
+# ---------------------------------------------------------
+# 7. UI: Video Details & Publishing Controls
+# ---------------------------------------------------------
 st.divider()
 st.subheader("Video Details & Publish Settings")
 
