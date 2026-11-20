@@ -1,3 +1,4 @@
+import hashlib
 import time
 from urllib.parse import urlencode
 import requests
@@ -17,8 +18,6 @@ META_SCOPES = [
     "pages_show_list",
     "pages_read_engagement",
     "pages_manage_posts",
-    "instagram_basic",
-    "instagram_content_publish"
 ]
 STORE_KEY = "meta"
 
@@ -317,31 +316,58 @@ def upload_to_facebook(
     return data
 
 
-def upload_to_instagram(
-    video_path,
-    caption,
-    ig_user_id,
-    page_token,
-    publish_mode="Public",
-    schedule_unix_ts=None,
-):
-    video_url = str(st.secrets.get("IG_VIDEO_URL", "")).strip()
-
-    if not ig_user_id or not page_token:
-        raise RuntimeError("Is Facebook Page se linked Instagram Business/Creator account nahi mila.")
-    if not video_url:
+def _cloudinary_creds():
+    cloud = str(st.secrets.get("CLOUDINARY_CLOUD_NAME", "")).strip()
+    key = str(st.secrets.get("CLOUDINARY_API_KEY", "")).strip()
+    secret = str(st.secrets.get("CLOUDINARY_API_SECRET", "")).strip()
+    if not (cloud and key and secret):
         raise RuntimeError(
-            "Instagram Graph API video publish ke liye public video_url mangti hai. "
-            "Secrets mein IG_VIDEO_URL set karein."
+            "Secrets mein CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY aur "
+            "CLOUDINARY_API_SECRET set karein."
         )
+    return cloud, key, secret
 
-    mode = publish_mode.strip().lower()
-    if mode == "schedule":
+
+def _cloudinary_sign(params, secret):
+    to_sign = "&".join(f"{k}={params[k]}" for k in sorted(params))
+    return hashlib.sha1((to_sign + secret).encode("utf-8")).hexdigest()
+
+
+def _upload_to_cloudinary(video_path):
+    """Upload the video so Instagram gets a public URL. Returns (url, public_id)."""
+    cloud, key, secret = _cloudinary_creds()
+    timestamp = int(time.time())
+    signature = _cloudinary_sign({"timestamp": timestamp}, secret)
+    with open(video_path, "rb") as f:
+        resp = requests.post(
+            f"https://api.cloudinary.com/v1_1/{cloud}/video/upload",
+            data={"api_key": key, "timestamp": timestamp, "signature": signature},
+            files={"file": f},
+            timeout=600,
+        )
+    data = resp.json()
+    if resp.status_code >= 400 or "secure_url" not in data:
         raise RuntimeError(
-            "Instagram Content Publishing API direct future scheduling ko directly support nahi karti; "
-            "isse Public ya Private mode mein publish karein."
+            "Cloudinary upload failed: " + str(data.get("error", {}).get("message") or data)
         )
+    return data["secure_url"], data["public_id"]
 
+
+def _delete_from_cloudinary(public_id):
+    """Best-effort cleanup so your free storage does not fill up."""
+    try:
+        cloud, key, secret = _cloudinary_creds()
+        params = {"public_id": public_id, "timestamp": int(time.time())}
+        requests.post(
+            f"https://api.cloudinary.com/v1_1/{cloud}/video/destroy",
+            data={**params, "api_key": key, "signature": _cloudinary_sign(params, secret)},
+            timeout=60,
+        )
+    except Exception:
+        pass
+
+
+def _publish_instagram_reel(video_url, caption, ig_user_id, page_token, mode):
     create_url = f"https://graph.facebook.com/{GRAPH_VERSION}/{ig_user_id}/media"
     create_resp = requests.post(
         create_url,
@@ -359,32 +385,57 @@ def upload_to_instagram(
         raise RuntimeError(create_resp.get("error", {}).get("message", str(create_resp)))
 
     status_url = f"https://graph.facebook.com/{GRAPH_VERSION}/{creation_id}"
-    for _ in range(20):
+    for _ in range(60):  # up to ~3 minutes
         status_resp = requests.get(
             status_url,
-            params={"fields": "status_code", "access_token": page_token},
+            params={"fields": "status_code,status", "access_token": page_token},
             timeout=30,
         ).json()
         code = status_resp.get("status_code")
         if code == "FINISHED":
             break
         if code == "ERROR":
-            raise RuntimeError("Instagram ne video processing mein error diya.")
+            raise RuntimeError(
+                "Instagram ne video processing mein error diya: " + str(status_resp.get("status", ""))
+            )
         time.sleep(3)
+    else:
+        raise RuntimeError("Instagram video processing mein bahut time lag raha hai. Thodi der baad try karein.")
 
     if mode == "private":
         return {"id": creation_id, "status": "container_created_not_published"}
 
-    publish_url = f"https://graph.facebook.com/{GRAPH_VERSION}/{ig_user_id}/media_publish"
     pub_resp = requests.post(
-        publish_url,
-        data={
-            "creation_id": creation_id,
-            "access_token": page_token,
-        },
+        f"https://graph.facebook.com/{GRAPH_VERSION}/{ig_user_id}/media_publish",
+        data={"creation_id": creation_id, "access_token": page_token},
         timeout=60,
     ).json()
 
     if "id" not in pub_resp:
         raise RuntimeError(pub_resp.get("error", {}).get("message", str(pub_resp)))
     return pub_resp
+
+
+def upload_to_instagram(
+    video_path,
+    caption,
+    ig_user_id,
+    page_token,
+    publish_mode="Public",
+    schedule_unix_ts=None,
+):
+    if not ig_user_id or not page_token:
+        raise RuntimeError("Is Facebook Page se linked Instagram Business/Creator account nahi mila.")
+
+    mode = publish_mode.strip().lower()
+    if mode == "schedule":
+        raise RuntimeError(
+            "Instagram Content Publishing API direct future scheduling ko support nahi karti; "
+            "isse Public ya Private mode mein publish karein."
+        )
+
+    video_url, public_id = _upload_to_cloudinary(video_path)
+    try:
+        return _publish_instagram_reel(video_url, caption, ig_user_id, page_token, mode)
+    finally:
+        _delete_from_cloudinary(public_id)
