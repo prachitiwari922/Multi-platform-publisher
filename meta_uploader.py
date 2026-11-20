@@ -135,6 +135,46 @@ def fetch_debug_info(user_token, app_id, app_secret):
     return " | ".join(parts)
 
 
+def fetch_pages_by_granted_targets(user_token, app_id, app_secret):
+    """Fallback for Pages owned through a Business portfolio: /me/accounts
+    returns [] for those, but the Page IDs the user selected in the login
+    popup are still granted. Fetch each Page directly by its ID."""
+    errors = []
+    pages = []
+    try:
+        dbg = requests.get(
+            f"https://graph.facebook.com/{GRAPH_VERSION}/debug_token",
+            params={"input_token": user_token, "access_token": f"{app_id}|{app_secret}"},
+            timeout=30,
+        ).json()
+        ids = []
+        for g in dbg.get("data", {}).get("granular_scopes", []):
+            if g.get("scope") in ("pages_show_list", "pages_manage_posts", "pages_read_engagement"):
+                for pid in g.get("target_ids") or []:
+                    if pid not in ids:
+                        ids.append(pid)
+    except Exception as e:
+        return [], [f"debug_token failed: {e}"]
+
+    for pid in ids:
+        try:
+            r = requests.get(
+                f"https://graph.facebook.com/{GRAPH_VERSION}/{pid}",
+                params={
+                    "fields": "id,name,access_token,instagram_business_account{id,username}",
+                    "access_token": user_token,
+                },
+                timeout=30,
+            ).json()
+            if r.get("id") and r.get("access_token"):
+                pages.append(r)
+            else:
+                errors.append(f"Page {pid}: {r.get('error', {}).get('message') or r}")
+        except Exception as e:
+            errors.append(f"Page {pid}: {e}")
+    return pages, errors
+
+
 def fetch_user_pages_and_ig(user_access_token):
     resp = requests.get(
         f"https://graph.facebook.com/{GRAPH_VERSION}/me/accounts",
@@ -181,12 +221,16 @@ def process_meta_oauth_callback():
             user_token = exchange_meta_code(auth_code, app_id, app_secret)
             user_token = exchange_long_lived(user_token, app_id, app_secret)
             pages = fetch_user_pages_and_ig(user_token)
+            fallback_errors = []
+            if not pages:
+                pages, fallback_errors = fetch_pages_by_granted_targets(user_token, app_id, app_secret)
             if pages:
                 token_store.save(STORE_KEY, {"user_token": user_token, "pages": pages})
             else:
                 granted = fetch_granted_permissions(user_token)
                 st.session_state["meta_error"] = (
                     "DEBUG: Facebook ne 0 Pages diye. "
+                    f"Page fetch errors: {fallback_errors} || "
                     f"Granted permissions: {granted} || "
                     f"{fetch_debug_info(user_token, app_id, app_secret)}"
                 )
