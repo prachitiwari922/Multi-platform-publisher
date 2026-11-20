@@ -104,6 +104,37 @@ def fetch_granted_permissions(user_access_token):
         return f"could not read ({e})"
 
 
+def fetch_debug_info(user_token, app_id, app_secret):
+    """Which account logged in, and which Page IDs Facebook actually granted."""
+    parts = []
+    try:
+        me = requests.get(
+            f"https://graph.facebook.com/{GRAPH_VERSION}/me",
+            params={"fields": "id,name", "access_token": user_token},
+            timeout=30,
+        ).json()
+        parts.append(f"Logged in as: {me.get('name')} ({me.get('id')})")
+    except Exception as e:
+        parts.append(f"me lookup failed ({e})")
+    try:
+        dbg = requests.get(
+            f"https://graph.facebook.com/{GRAPH_VERSION}/debug_token",
+            params={"input_token": user_token, "access_token": f"{app_id}|{app_secret}"},
+            timeout=30,
+        ).json()
+        gran = dbg.get("data", {}).get("granular_scopes", [])
+        if gran:
+            parts.append(
+                "Granted targets: "
+                + "; ".join(f"{g.get('scope')} -> {g.get('target_ids')}" for g in gran)
+            )
+        else:
+            parts.append("Granted targets: none (no Page was selected in the popup)")
+    except Exception as e:
+        parts.append(f"debug_token failed ({e})")
+    return " | ".join(parts)
+
+
 def fetch_user_pages_and_ig(user_access_token):
     resp = requests.get(
         f"https://graph.facebook.com/{GRAPH_VERSION}/me/accounts",
@@ -156,7 +187,8 @@ def process_meta_oauth_callback():
                 granted = fetch_granted_permissions(user_token)
                 st.session_state["meta_error"] = (
                     "DEBUG: Facebook ne 0 Pages diye. "
-                    f"Granted permissions: {granted}"
+                    f"Granted permissions: {granted} || "
+                    f"{fetch_debug_info(user_token, app_id, app_secret)}"
                 )
             st.session_state["meta_user_token"] = user_token
             st.session_state["meta_pages"] = pages
