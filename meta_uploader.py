@@ -91,6 +91,19 @@ def exchange_long_lived(short_token, app_id, app_secret):
         return short_token
 
 
+def fetch_granted_permissions(user_access_token):
+    try:
+        resp = requests.get(
+            f"https://graph.facebook.com/{GRAPH_VERSION}/me/permissions",
+            params={"access_token": user_access_token},
+            timeout=30,
+        )
+        rows = resp.json().get("data", [])
+        return ", ".join(f"{r.get('permission')}={r.get('status')}" for r in rows) or "none"
+    except Exception as e:
+        return f"could not read ({e})"
+
+
 def fetch_user_pages_and_ig(user_access_token):
     resp = requests.get(
         f"https://graph.facebook.com/{GRAPH_VERSION}/me/accounts",
@@ -137,11 +150,19 @@ def process_meta_oauth_callback():
             user_token = exchange_meta_code(auth_code, app_id, app_secret)
             user_token = exchange_long_lived(user_token, app_id, app_secret)
             pages = fetch_user_pages_and_ig(user_token)
-            token_store.save(STORE_KEY, {"user_token": user_token, "pages": pages})
+            if pages:
+                token_store.save(STORE_KEY, {"user_token": user_token, "pages": pages})
+            else:
+                granted = fetch_granted_permissions(user_token)
+                st.session_state["meta_error"] = (
+                    "DEBUG: Facebook ne 0 Pages diye. "
+                    f"Granted permissions: {granted}"
+                )
             st.session_state["meta_user_token"] = user_token
             st.session_state["meta_pages"] = pages
             st.session_state["meta_connected"] = True
-            st.session_state["meta_error"] = None
+            if pages:
+                st.session_state["meta_error"] = None
             if platform_hint == "facebook":
                 st.session_state["cb_fb"] = True
             elif platform_hint == "instagram":
