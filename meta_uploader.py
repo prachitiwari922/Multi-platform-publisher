@@ -17,6 +17,8 @@ META_SCOPES = [
     "pages_show_list",
     "pages_read_engagement",
     "pages_manage_posts",
+    "instagram_basic",
+    "instagram_content_publish"
 ]
 STORE_KEY = "meta"
 
