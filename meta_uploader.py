@@ -13,14 +13,7 @@ META_TOKEN_URI = f"https://graph.facebook.com/{GRAPH_VERSION}/oauth/access_token
 # These must also be added to your Meta App (Use cases / Permissions).
 # In Development mode they work for app admins/testers without App Review.
 META_SCOPES = [
-    "public_profile",
-    "pages_show_list",
-    "pages_read_engagement",
-    "pages_manage_posts",
-    "publish_video",
-    "instagram_basic",
-    "instagram_content_publish",
-    "business_management",
+    "public_profile"
 ]
 STORE_KEY = "meta"
 
